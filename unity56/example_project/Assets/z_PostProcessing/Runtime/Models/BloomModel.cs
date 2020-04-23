@@ -50,9 +50,11 @@ namespace UnityEngine.PostProcessing
         {
             [Tooltip("Dirtiness texture to add smudges or dust to the lens.")]
             public Texture texture;
+            
 
             [Min(0f), Tooltip("Amount of lens dirtiness.")]
             public float intensity;
+          
 
             public static LensDirtSettings defaultSettings
             {
@@ -62,6 +64,7 @@ namespace UnityEngine.PostProcessing
                     {
                         texture = null,
                         intensity = 3f
+                         
                     };
                 }
             }

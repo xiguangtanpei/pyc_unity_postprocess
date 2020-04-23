@@ -372,11 +372,11 @@ code {
 <p><img src="img/20181225173228495.png" alt="img"></p>
 <p>主要是对于高亮部分进行模糊操作</p>
 <p>下面来学习关于unity 中的描述<br>
-<img src="img/guan.jpg" alt="">
-<img src="img/kai.jpg" alt="img"><br>
-具体操作界面<br>
-<img src="img/Snipaste_2020-04-22_15-27-09.jpg" alt="img"><br>
-可以看到 在shade 开始是传入3个纹理</p>
+<img src="img/guan.jpg" alt=""></p>
+<p><img src="img/kai.jpg" alt="img"></p>
+<p>具体操作界面</p>
+<p><img src="img/Snipaste_2020-04-22_15-27-09.jpg" alt="img"></p>
+<p>可以看到 在shade 开始是传入3个纹理</p>
 <pre class="hljs"><code><div>        _MainTex (&quot;&quot;, 2D) = &quot;&quot; {}
         _BaseTex (&quot;&quot;, 2D) = &quot;&quot; {}
         _AutoExposure (&quot;&quot;, 2D) = &quot;&quot; {}
@@ -394,6 +394,520 @@ code {
     <span class="hljs-keyword">return</span> uv.xy * scaleAndOffset.xy + scaleAndOffset.zw;
 }
 </div></code></pre>
+<p>这里是渲染流程后处理阶段， 传入的MainTex 本身应该就是rt<br>
+后续通过设置平面坐标系 完成相应的设置，这里是完成顶点部分uv 设置</p>
+<pre class="hljs"><code><div>o. uvMain = UnityStereoScreenSpaceUVAdjust(v. texcoord. xy, _MainTex_ST); 
+o. uvBase = o. uvMain; 
+
+<span class="hljs-meta">#<span class="hljs-meta-keyword">if</span> UNITY_UV_STARTS_AT_TOP</span>
+<span class="hljs-keyword">if</span> (_BaseTex_TexelSize. y &lt; <span class="hljs-number">0.</span> <span class="hljs-number">0</span>)
+
+    o.uvBase.y = <span class="hljs-number">1.0</span> - o.uvBase.y;
+
+<span class="hljs-meta">#<span class="hljs-meta-keyword">endif</span></span>
+
+</div></code></pre>
+<h3 id="%E5%83%8F%E7%B4%A0%E9%98%B6%E6%AE%B5%E5%87%BD%E6%95%B0">像素阶段函数</h3>
+<p>这里解释是 自动曝光，使用顶点阶段计算的uv 采样曝光图 使用r通道， 然后对于图片进行 采样并曝光<br>
+代码中找到可以知道其实这部分操作应该是设置的</p>
+<pre class="hljs"><code><div> internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _AutoExposure        = Shader.PropertyToID(<span class="hljs-string">"_AutoExposure"</span>);
+
+</div></code></pre>
+<pre class="hljs"><code><div>
+        <span class="hljs-function">half4 <span class="hljs-title">FetchAutoExposed</span><span class="hljs-params">(sampler2D tex, float2 uv)</span>
+        </span>{
+            <span class="hljs-keyword">float</span> autoExposure = <span class="hljs-number">1.0</span>;
+            uv = UnityStereoScreenSpaceUVAdjust(uv, _MainTex_ST);
+            autoExposure = tex2D(_AutoExposure, uv).r;
+            <span class="hljs-keyword">return</span> tex2D(tex, uv) * autoExposure;
+        }
+
+</div></code></pre>
+<p>在说明获取采样高亮部分需要知道一些参数</p>
+<p>设置高动态安全范围,最高数值是 65504</p>
+<pre class="hljs"><code><div><span class="hljs-comment">// Clamp HDR value within a safe range</span>
+<span class="hljs-function"><span class="hljs-keyword">inline</span> half  <span class="hljs-title">SafeHDR</span><span class="hljs-params">(half  c)</span> </span>{ <span class="hljs-keyword">return</span> <span class="hljs-built_in">min</span>(c, HALF_MAX); }
+<span class="hljs-function"><span class="hljs-keyword">inline</span> half2 <span class="hljs-title">SafeHDR</span><span class="hljs-params">(half2 c)</span> </span>{ <span class="hljs-keyword">return</span> <span class="hljs-built_in">min</span>(c, HALF_MAX); }
+<span class="hljs-function"><span class="hljs-keyword">inline</span> half3 <span class="hljs-title">SafeHDR</span><span class="hljs-params">(half3 c)</span> </span>{ <span class="hljs-keyword">return</span> <span class="hljs-built_in">min</span>(c, HALF_MAX); }
+<span class="hljs-function"><span class="hljs-keyword">inline</span> half4 <span class="hljs-title">SafeHDR</span><span class="hljs-params">(half4 c)</span> </span>{ <span class="hljs-keyword">return</span> <span class="hljs-built_in">min</span>(c, HALF_MAX); }
+
+</div></code></pre>
+<p>计算三个数值的中间数值<br>
+因为是float3类型所以可能会出现不一样的 数据情况，比如[0.2,0.9,0.5]类似这样的数值会拆分从组和</p>
+<pre class="hljs"><code><div><span class="hljs-comment">// 3-tap median filter</span>
+<span class="hljs-function">half3 <span class="hljs-title">Median</span><span class="hljs-params">(half3 a, half3 b, half3 c)</span>
+</span>{
+    <span class="hljs-keyword">return</span> a + b + c - <span class="hljs-built_in">min</span>(<span class="hljs-built_in">min</span>(a, b), c) - <span class="hljs-built_in">max</span>(<span class="hljs-built_in">max</span>(a, b), c);
+}
+</div></code></pre>
+<p>对于曝光图采样， 有两种处理方法  一种是防止闪烁<br>
+采用5次采样处理方案</p>
+<pre class="hljs"><code><div>        <span class="hljs-meta">#<span class="hljs-meta-keyword">if</span> ANTI_FLICKER</span>
+            float3 d = _MainTex_TexelSize.xyx * float3(<span class="hljs-number">1.0</span>, <span class="hljs-number">1.0</span>, <span class="hljs-number">0.0</span>);
+            half4 s0 = SafeHDR(FetchAutoExposed(_MainTex, uv));
+            half3 s1 = SafeHDR(FetchAutoExposed(_MainTex, uv - d.xz).rgb);
+            half3 s2 = SafeHDR(FetchAutoExposed(_MainTex, uv + d.xz).rgb);
+            half3 s3 = SafeHDR(FetchAutoExposed(_MainTex, uv - d.zy).rgb);
+            half3 s4 = SafeHDR(FetchAutoExposed(_MainTex, uv + d.zy).rgb);
+            half3 m = Median(Median(s0.rgb, s1, s2), s3, s4);
+        <span class="hljs-meta">#<span class="hljs-meta-keyword">else</span></span>
+            half4 s0 = SafeHDR(FetchAutoExposed(_MainTex, uv));
+            half3 m = s0.rgb;
+        <span class="hljs-meta">#<span class="hljs-meta-keyword">endif</span></span>
+
+</div></code></pre>
+<p>设计到色彩空间转换使用的是unity的底部操作</p>
+<pre class="hljs"><code><div><span class="hljs-function"><span class="hljs-keyword">inline</span> half3 <span class="hljs-title">GammaToLinearSpace</span> <span class="hljs-params">(half3 sRGB)</span>
+</span>{
+    <span class="hljs-comment">// Approximate version from http://chilliant.blogspot.com.au/2012/08/srgb-approximations-for-hlsl.html?m=1</span>
+    <span class="hljs-keyword">return</span> sRGB * (sRGB * (sRGB * <span class="hljs-number">0.305306011</span>h + <span class="hljs-number">0.682171111</span>h) + <span class="hljs-number">0.012522878</span>h);
+
+    <span class="hljs-comment">// Precise version, useful for debugging.</span>
+    <span class="hljs-comment">//return half3(GammaToLinearSpaceExact(sRGB.r), GammaToLinearSpaceExact(sRGB.g), GammaToLinearSpaceExact(sRGB.b));</span>
+}
+<span class="hljs-function"><span class="hljs-keyword">inline</span> half3 <span class="hljs-title">LinearToGammaSpace</span> <span class="hljs-params">(half3 linRGB)</span>
+</span>{
+    linRGB = <span class="hljs-built_in">max</span>(linRGB, half3(<span class="hljs-number">0.</span>h, <span class="hljs-number">0.</span>h, <span class="hljs-number">0.</span>h));
+    <span class="hljs-comment">// An almost-perfect approximation from http://chilliant.blogspot.com.au/2012/08/srgb-approximations-for-hlsl.html?m=1</span>
+    <span class="hljs-keyword">return</span> <span class="hljs-built_in">max</span>(<span class="hljs-number">1.055</span>h * <span class="hljs-built_in">pow</span>(linRGB, <span class="hljs-number">0.416666667</span>h) - <span class="hljs-number">0.055</span>h, <span class="hljs-number">0.</span>h);
+
+    <span class="hljs-comment">// Exact version, useful for debugging.</span>
+    <span class="hljs-comment">//return half3(LinearToGammaSpaceExact(linRGB.r), LinearToGammaSpaceExact(linRGB.g), LinearToGammaSpaceExact(linRGB.b));</span>
+}
+</div></code></pre>
+<p>亮度提取函数</p>
+<pre class="hljs"><code><div><span class="hljs-comment">// Brightness function</span>
+<span class="hljs-function">half <span class="hljs-title">Brightness</span><span class="hljs-params">(half3 c)</span>
+</span>{
+    <span class="hljs-keyword">return</span> Max3(c);
+}
+max3 定义取出颜色的最大定义在common中有定义  
+<span class="hljs-function"><span class="hljs-keyword">inline</span> half <span class="hljs-title">Max3</span><span class="hljs-params">(half3 x)</span> </span>{ <span class="hljs-keyword">return</span> <span class="hljs-built_in">max</span>(x.x, <span class="hljs-built_in">max</span>(x.y, x.z)); }
+<span class="hljs-function"><span class="hljs-keyword">inline</span> half <span class="hljs-title">Max3</span><span class="hljs-params">(half x, half y, half z)</span> </span>{ <span class="hljs-keyword">return</span> <span class="hljs-built_in">max</span>(x, <span class="hljs-built_in">max</span>(y, z)); }
+</div></code></pre>
+<p>到这里可以把亮度像素过滤函数加回来</p>
+<pre class="hljs"><code><div> <span class="hljs-function">half4 <span class="hljs-title">FragPrefilter</span><span class="hljs-params">(VaryingsDefault i)</span> : SV_Target
+        </span>{
+            float2 uv = i.uv + _MainTex_TexelSize.xy * _PrefilterOffs;
+
+        <span class="hljs-meta">#<span class="hljs-meta-keyword">if</span> ANTI_FLICKER</span>
+            float3 d = _MainTex_TexelSize.xyx * float3(<span class="hljs-number">1.0</span>, <span class="hljs-number">1.0</span>, <span class="hljs-number">0.0</span>);
+            half4 s0 = SafeHDR(FetchAutoExposed(_MainTex, uv));
+            half3 s1 = SafeHDR(FetchAutoExposed(_MainTex, uv - d.xz).rgb);
+            half3 s2 = SafeHDR(FetchAutoExposed(_MainTex, uv + d.xz).rgb);
+            half3 s3 = SafeHDR(FetchAutoExposed(_MainTex, uv - d.zy).rgb);
+            half3 s4 = SafeHDR(FetchAutoExposed(_MainTex, uv + d.zy).rgb);
+            half3 m = Median(Median(s0.rgb, s1, s2), s3, s4);
+        <span class="hljs-meta">#<span class="hljs-meta-keyword">else</span></span>
+            half4 s0 = SafeHDR(FetchAutoExposed(_MainTex, uv));
+            half3 m = s0.rgb;
+        <span class="hljs-meta">#<span class="hljs-meta-keyword">endif</span></span>
+<span class="hljs-comment">// 取出图进行曝光处理  </span>
+        <span class="hljs-meta">#<span class="hljs-meta-keyword">if</span> UNITY_COLORSPACE_GAMMA</span>
+            m = GammaToLinearSpace(m);
+        <span class="hljs-meta">#<span class="hljs-meta-keyword">endif</span></span>
+<span class="hljs-comment">/// 根据引擎设置确定转到线性空间处理  </span>
+            <span class="hljs-comment">// Pixel brightness</span>
+            half br = Brightness(m);
+<span class="hljs-comment">/// 取得像素的最大亮度  </span>
+
+            <span class="hljs-comment">// Under-threshold part: quadratic curve</span>
+            half rq = clamp(br - _Curve.x, <span class="hljs-number">0.0</span>, _Curve.y);
+            rq = _Curve.z * rq * rq;
+
+            <span class="hljs-comment">// Combine and apply the brightness response curve.</span>
+            m *= <span class="hljs-built_in">max</span>(rq, br - _Threshold) / <span class="hljs-built_in">max</span>(br, <span class="hljs-number">1e-5</span>);
+
+            <span class="hljs-keyword">return</span> EncodeHDR(m);
+        }
+</div></code></pre>
+<p>关于curve 传入 和这里有关系<br>
+<img src="img/3.jpg" alt="img"><br>
+其实通过显示曲线世可以看出来的，本身亮度减去阈值，同时限制在 亮度的两边中最后， 两倍后  、
+最后吧亮度曲线*颜色</p>
+<p>如果高动态编码成rgbm 如果世底动态实际输出</p>
+<pre class="hljs"><code><div><span class="hljs-function">half4 <span class="hljs-title">EncodeHDR</span><span class="hljs-params">(float3 rgb)</span>
+</span>{
+<span class="hljs-meta">#<span class="hljs-meta-keyword">if</span> USE_RGBM</span>
+    rgb *= <span class="hljs-number">1.0</span> / <span class="hljs-number">8.0</span>;
+    <span class="hljs-keyword">float</span> m = <span class="hljs-built_in">max</span>(<span class="hljs-built_in">max</span>(rgb.r, rgb.g), <span class="hljs-built_in">max</span>(rgb.b, <span class="hljs-number">1e-6</span>));
+    m = <span class="hljs-built_in">ceil</span>(m * <span class="hljs-number">255.0</span>) / <span class="hljs-number">255.0</span>;
+    <span class="hljs-keyword">return</span> half4(rgb / m, m);
+<span class="hljs-meta">#<span class="hljs-meta-keyword">else</span></span>
+    <span class="hljs-keyword">return</span> half4(rgb, <span class="hljs-number">0.0</span>);
+<span class="hljs-meta">#<span class="hljs-meta-keyword">endif</span></span>
+}
+
+<span class="hljs-function">float3 <span class="hljs-title">DecodeHDR</span><span class="hljs-params">(half4 rgba)</span>
+</span>{
+<span class="hljs-meta">#<span class="hljs-meta-keyword">if</span> USE_RGBM</span>
+    <span class="hljs-keyword">return</span> rgba.rgb * rgba.a * <span class="hljs-number">8.0</span>;
+<span class="hljs-meta">#<span class="hljs-meta-keyword">else</span></span>
+    <span class="hljs-keyword">return</span> rgba.rgb;
+<span class="hljs-meta">#<span class="hljs-meta-keyword">endif</span></span>
+}
+
+</div></code></pre>
+<p>在我自己库中有单独说 但是这里是关于hdr问题  <strong>HDR文件格式简介 - CSDN博客---rgbe格式rgb格式转换----</strong><br>
+<a href="http://www.xionggf.com/post/cg/inside_hdr/">rgbm</a><br>
+可以看到选择范围是不同的这里使用的是 6<br>
+<a href="%5Bhttps://link%5D(http://graphicrants.blogspot.com/2009/04/rgbm-color-encoding.html)">rgbm</a></p>
+<h3 id="%E4%B8%8B%E9%9D%A2%E7%86%9F%E6%89%8B%E9%99%8D%E9%87%87%E6%A0%B7">下面熟手降采样</h3>
+<p>使用的函数</p>
+<pre class="hljs"><code><div>
+        <span class="hljs-function">half4 <span class="hljs-title">FragDownsample1</span><span class="hljs-params">(VaryingsDefault i)</span> : SV_Target
+        </span>{
+        <span class="hljs-meta">#<span class="hljs-meta-keyword">if</span> ANTI_FLICKER</span>
+            <span class="hljs-keyword">return</span> EncodeHDR(DownsampleAntiFlickerFilter(_MainTex, i.uvSPR, _MainTex_TexelSize.xy));
+        <span class="hljs-meta">#<span class="hljs-meta-keyword">else</span></span>
+            <span class="hljs-keyword">return</span> EncodeHDR(DownsampleFilter(_MainTex, i.uvSPR, _MainTex_TexelSize.xy));
+        <span class="hljs-meta">#<span class="hljs-meta-keyword">endif</span></span>
+        }
+</div></code></pre>
+<p>使用到的是box采样，注意采样4次<br>
+<a href="https://zhuanlan.zhihu.com/p/125744132">浅陌文章</a><br>
+关于这部分还是不是很清楚 ，但是进行一次模糊</p>
+<pre class="hljs"><code><div><span class="hljs-comment">// Downsample with a 4x4 box filter</span>
+<span class="hljs-function">half3 <span class="hljs-title">DownsampleFilter</span><span class="hljs-params">(sampler2D tex, float2 uv, float2 texelSize)</span>
+</span>{
+    float4 d = texelSize.xyxy * float4(<span class="hljs-number">-1.0</span>, <span class="hljs-number">-1.0</span>, <span class="hljs-number">1.0</span>, <span class="hljs-number">1.0</span>);
+
+    half3 s;
+    s = DecodeHDR(tex2D(tex, uv + d.xy));
+    s += DecodeHDR(tex2D(tex, uv + d.zy));
+    s += DecodeHDR(tex2D(tex, uv + d.xw));
+    s += DecodeHDR(tex2D(tex, uv + d.zw));
+
+    <span class="hljs-keyword">return</span> s * (<span class="hljs-number">1.0</span> / <span class="hljs-number">4.0</span>);
+}
+</div></code></pre>
+<p>这里可以进行两次</p>
+<pre class="hljs"><code><div>        <span class="hljs-function">half4 <span class="hljs-title">FragDownsample2</span><span class="hljs-params">(VaryingsDefault i)</span> : SV_Target
+        </span>{
+            <span class="hljs-keyword">return</span> EncodeHDR(DownsampleFilter(_MainTex, i.uvSPR, _MainTex_TexelSize.xy));
+        }
+</div></code></pre>
+<p>最后一次是基础+ 模糊进行合并</p>
+<pre class="hljs"><code><div>        <span class="hljs-function">half4 <span class="hljs-title">FragUpsample</span><span class="hljs-params">(VaryingsMultitex i)</span> : SV_Target
+        </span>{
+            half3 base = DecodeHDR(tex2D(_BaseTex, i.uvBase));
+            half3 blur = UpsampleFilter(_MainTex, i.uvMain, _MainTex_TexelSize.xy, _SampleScale);
+            <span class="hljs-keyword">return</span> EncodeHDR(base + blur);
+        }
+</div></code></pre>
+<pre class="hljs"><code><div><span class="hljs-function">half3 <span class="hljs-title">UpsampleFilter</span><span class="hljs-params">(sampler2D tex, float2 uv, float2 texelSize, <span class="hljs-keyword">float</span> sampleScale)</span>
+</span>{
+<span class="hljs-meta">#<span class="hljs-meta-keyword">if</span> MOBILE_OR_CONSOLE</span>
+    <span class="hljs-comment">// 4-tap bilinear upsampler</span>
+    float4 d = texelSize.xyxy * float4(<span class="hljs-number">-1.0</span>, <span class="hljs-number">-1.0</span>, <span class="hljs-number">1.0</span>, <span class="hljs-number">1.0</span>) * (sampleScale * <span class="hljs-number">0.5</span>);
+
+    half3 s;
+    s =  DecodeHDR(tex2D(tex, uv + d.xy));
+    s += DecodeHDR(tex2D(tex, uv + d.zy));
+    s += DecodeHDR(tex2D(tex, uv + d.xw));
+    s += DecodeHDR(tex2D(tex, uv + d.zw));
+
+    <span class="hljs-keyword">return</span> s * (<span class="hljs-number">1.0</span> / <span class="hljs-number">4.0</span>);
+<span class="hljs-meta">#<span class="hljs-meta-keyword">else</span></span>
+    <span class="hljs-comment">// 9-tap bilinear upsampler (tent filter)</span>
+    float4 d = texelSize.xyxy * float4(<span class="hljs-number">1.0</span>, <span class="hljs-number">1.0</span>, <span class="hljs-number">-1.0</span>, <span class="hljs-number">0.0</span>) * sampleScale;
+
+    half3 s;
+    s =  DecodeHDR(tex2D(tex, uv - d.xy));
+    s += DecodeHDR(tex2D(tex, uv - d.wy)) * <span class="hljs-number">2.0</span>;
+    s += DecodeHDR(tex2D(tex, uv - d.zy));
+
+    s += DecodeHDR(tex2D(tex, uv + d.zw)) * <span class="hljs-number">2.0</span>;
+    s += DecodeHDR(tex2D(tex, uv))        * <span class="hljs-number">4.0</span>;
+    s += DecodeHDR(tex2D(tex, uv + d.xw)) * <span class="hljs-number">2.0</span>;
+
+    s += DecodeHDR(tex2D(tex, uv + d.zy));
+    s += DecodeHDR(tex2D(tex, uv + d.wy)) * <span class="hljs-number">2.0</span>;
+    s += DecodeHDR(tex2D(tex, uv + d.xy));
+
+    <span class="hljs-keyword">return</span> s * (<span class="hljs-number">1.0</span> / <span class="hljs-number">16.0</span>);
+<span class="hljs-meta">#<span class="hljs-meta-keyword">endif</span></span>
+}
+</div></code></pre>
+<p>统一使用的vs顶点函数<br>
+这里使用了完整的uv 顶点阶段shader，这里理解是模型变换的标准坐标中，所以这里可以使用顶点loacluv当作屏幕空间uv</p>
+<pre class="hljs"><code><div><span class="hljs-function">VaryingsDefault <span class="hljs-title">VertDefault</span><span class="hljs-params">(AttributesDefault v)</span>
+</span>{
+    VaryingsDefault o;
+    o.pos = UnityObjectToClipPos(v.vertex);
+    o.uv = v.texcoord.xy;
+    o.uvSPR = UnityStereoScreenSpaceUVAdjust(v.texcoord.xy, _MainTex_ST);
+    <span class="hljs-keyword">return</span> o;
+}
+</div></code></pre>
+<p>具体引用过程， get亮度 进行两次降采样，每次都是用box过滤 完成4x4模糊最后合并</p>
+<pre class="hljs"><code><div>        ZTest Always Cull Off ZWrite Off
+
+        Pass
+        {
+            CGPROGRAM
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> multi_compile __ ANTI_FLICKER</span>
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> multi_compile __ UNITY_COLORSPACE_GAMMA</span>
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> vertex VertDefault</span>
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> fragment FragPrefilter</span>
+            ENDCG
+        }
+
+        Pass
+        {
+            CGPROGRAM
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> multi_compile __ ANTI_FLICKER</span>
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> vertex VertDefault</span>
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> fragment FragDownsample1</span>
+            ENDCG
+        }
+
+        Pass
+        {
+            CGPROGRAM
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> vertex VertDefault</span>
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> fragment FragDownsample2</span>
+            ENDCG
+        }
+
+        Pass
+        {
+            CGPROGRAM
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> vertex VertMultitex</span>
+                <span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> fragment FragUpsample</span>
+            ENDCG
+        }
+</div></code></pre>
+<h2 id="%E4%B8%8B%E9%9D%A2%E6%9D%A5%E5%85%B3%E8%81%94%E5%AF%B9%E9%82%A3%E4%B8%AA%E7%9A%84%E7%A8%8B%E5%BA%8F">下面来关联对那个的程序</h2>
+<p>主要说的就是shader中的程序是如何和界面操作关联的<br>
+<img src="img/Snipaste_2020-04-23_12-08-53.jpg" alt="img"></p>
+<pre class="hljs"><code><div>        _MainTex
+        sampler2D _BaseTex;
+        float2 _BaseTex_TexelSize;
+
+        sampler2D _AutoExposure;
+
+        <span class="hljs-keyword">float</span> _PrefilterOffs;
+        <span class="hljs-keyword">float</span> _Threshold;
+        float3 _Curve;
+        <span class="hljs-keyword">float</span> _SampleScale;
+</div></code></pre>
+<p>在BloomComponent中有相关的定义<br>
+在get 出来第一个类中可以看到相关的设置get</p>
+<pre class="hljs"><code><div>        <span class="hljs-keyword">static</span> <span class="hljs-class"><span class="hljs-keyword">class</span> <span class="hljs-title">Uniforms</span>
+        {</span>
+            internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _AutoExposure        = Shader.PropertyToID(<span class="hljs-string">"_AutoExposure"</span>);
+            internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _Threshold           = Shader.PropertyToID(<span class="hljs-string">"_Threshold"</span>);
+            internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _Curve               = Shader.PropertyToID(<span class="hljs-string">"_Curve"</span>);
+            internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _PrefilterOffs       = Shader.PropertyToID(<span class="hljs-string">"_PrefilterOffs"</span>);
+            internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _SampleScale         = Shader.PropertyToID(<span class="hljs-string">"_SampleScale"</span>);
+            internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _BaseTex             = Shader.PropertyToID(<span class="hljs-string">"_BaseTex"</span>);
+            internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _BloomTex            = Shader.PropertyToID(<span class="hljs-string">"_BloomTex"</span>);
+            internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _Bloom_Settings      = Shader.PropertyToID(<span class="hljs-string">"_Bloom_Settings"</span>);
+            internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _Bloom_DirtTex       = Shader.PropertyToID(<span class="hljs-string">"_Bloom_DirtTex"</span>);
+            internal <span class="hljs-keyword">static</span> readonly <span class="hljs-keyword">int</span> _Bloom_DirtIntensity = Shader.PropertyToID(<span class="hljs-string">"_Bloom_DirtIntensity"</span>);
+        }
+</div></code></pre>
+<p>里面有关于 _AutoExposure  _Threshold  _Curve  _PrefilterOffs _BaseTex  设置</p>
+<p>在预处理函数开头就实例化了ui 和 get了材质相关函数</p>
+<pre class="hljs"><code><div>            var bloom = model.settings.bloom;
+            var lensDirt = model.settings.lensDirt;
+            var material = context.materialFactory.Get(<span class="hljs-string">"Hidden/Post FX/Bloom"</span>);
+            material.shaderKeywords = null;
+</div></code></pre>
+<p>mode 定义</p>
+<pre class="hljs"><code><div>    <span class="hljs-keyword">public</span> abstract <span class="hljs-class"><span class="hljs-keyword">class</span> <span class="hljs-title">PostProcessingComponent</span>&lt;T&gt; :</span> PostProcessingComponentBase
+        where T : PostProcessingModel
+    {
+        <span class="hljs-keyword">public</span> T model { <span class="hljs-built_in">get</span>; internal <span class="hljs-built_in">set</span>; }
+
+        <span class="hljs-function"><span class="hljs-keyword">public</span> <span class="hljs-keyword">virtual</span> <span class="hljs-keyword">void</span> <span class="hljs-title">Init</span><span class="hljs-params">(PostProcessingContext pcontext, T pmodel)</span>
+        </span>{
+            context = pcontext;
+            model = pmodel;
+        }
+
+        <span class="hljs-function"><span class="hljs-keyword">public</span> <span class="hljs-keyword">override</span> PostProcessingModel <span class="hljs-title">GetModel</span><span class="hljs-params">()</span>
+        </span>{
+            <span class="hljs-keyword">return</span> model;
+        }
+    }
+</div></code></pre>
+<p>settings 这里是调用了独立的结构处理</p>
+<pre class="hljs"><code><div>        <span class="hljs-keyword">public</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> <span class="hljs-title">Settings</span>
+        {</span>
+            <span class="hljs-keyword">public</span> BloomSettings bloom;
+            <span class="hljs-keyword">public</span> LensDirtSettings lensDirt;
+
+            <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> Settings defaultSettings
+            {
+                <span class="hljs-built_in">get</span>
+                {
+                    <span class="hljs-keyword">return</span> <span class="hljs-keyword">new</span> Settings
+                    {
+                        bloom = BloomSettings.defaultSettings,
+                        lensDirt = LensDirtSettings.defaultSettings
+                    };
+                }
+            }
+        }
+</div></code></pre>
+<p>关于 bloom setinging   和 LensDirtSettings 是 对应的是unity 后处理一个可视化模块就是上面截图那样<br>
+两个模块都进行了序列操作 这里就是界面了</p>
+<pre class="hljs"><code><div><span class="hljs-keyword">public</span> <span class="hljs-class"><span class="hljs-keyword">class</span> <span class="hljs-title">BloomModel</span> :</span> PostProcessingModel
+    {
+        [Serializable]
+        <span class="hljs-keyword">public</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> <span class="hljs-title">BloomSettings</span>
+        {</span>
+            [Min(<span class="hljs-number">0f</span>), Tooltip(<span class="hljs-string">"Strength of the bloom filter."</span>)]
+            <span class="hljs-keyword">public</span> <span class="hljs-keyword">float</span> intensity;
+
+            [Min(<span class="hljs-number">0f</span>), Tooltip(<span class="hljs-string">"Filters out pixels under this level of brightness."</span>)]
+            <span class="hljs-keyword">public</span> <span class="hljs-keyword">float</span> threshold;
+
+            <span class="hljs-keyword">public</span> <span class="hljs-keyword">float</span> thresholdLinear
+            {
+                <span class="hljs-built_in">set</span> { threshold = Mathf.LinearToGammaSpace(value); }
+                <span class="hljs-built_in">get</span> { <span class="hljs-keyword">return</span> Mathf.GammaToLinearSpace(threshold); }
+            }
+
+            [Range(<span class="hljs-number">0f</span>, <span class="hljs-number">1f</span>), Tooltip(<span class="hljs-string">"Makes transition between under/over-threshold gradual (0 = hard threshold, 1 = soft threshold)."</span>)]
+            <span class="hljs-keyword">public</span> <span class="hljs-keyword">float</span> softKnee;
+
+            [Range(<span class="hljs-number">1f</span>, <span class="hljs-number">7f</span>), Tooltip(<span class="hljs-string">"Changes extent of veiling effects in a screen resolution-independent fashion."</span>)]
+            <span class="hljs-keyword">public</span> <span class="hljs-keyword">float</span> radius;
+
+            [Tooltip(<span class="hljs-string">"Reduces flashing noise with an additional filter."</span>)]
+            <span class="hljs-keyword">public</span> <span class="hljs-keyword">bool</span> antiFlicker;
+
+            <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> BloomSettings defaultSettings
+            {
+                <span class="hljs-built_in">get</span>
+                {
+                    <span class="hljs-keyword">return</span> <span class="hljs-keyword">new</span> BloomSettings
+                    {
+                        intensity = <span class="hljs-number">0.5f</span>,
+                        threshold = <span class="hljs-number">1.1f</span>,
+                        softKnee = <span class="hljs-number">0.5f</span>,
+                        radius = <span class="hljs-number">4f</span>,
+                        antiFlicker = <span class="hljs-literal">false</span>,
+                    };
+                }
+            }
+        }
+
+        [Serializable]
+        <span class="hljs-keyword">public</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> <span class="hljs-title">LensDirtSettings</span>
+        {</span>
+            [Tooltip(<span class="hljs-string">"Dirtiness texture to add smudges or dust to the lens."</span>)]
+            <span class="hljs-keyword">public</span> Texture texture;
+
+            [Min(<span class="hljs-number">0f</span>), Tooltip(<span class="hljs-string">"Amount of lens dirtiness."</span>)]
+            <span class="hljs-keyword">public</span> <span class="hljs-keyword">float</span> intensity;
+
+            <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> LensDirtSettings defaultSettings
+            {
+                <span class="hljs-built_in">get</span>
+                {
+                    <span class="hljs-keyword">return</span> <span class="hljs-keyword">new</span> LensDirtSettings
+                    {
+                        texture = null,
+                        intensity = <span class="hljs-number">3f</span>
+                    };
+                }
+            }
+        }
+</div></code></pre>
+<p>设置第一个纹理自动曝光 是上面预处理函数传递过来的</p>
+<pre class="hljs"><code><div>material.SetTexture(Uniforms._AutoExposure, autooExposure);
+<span class="hljs-function"><span class="hljs-keyword">public</span> <span class="hljs-keyword">void</span> <span class="hljs-title">Prepare</span><span class="hljs-params">(RenderTexture source, Material uberMaterial, Texture autoExposure)</span>
+</span></div></code></pre>
+<p>关于与该类调用在  UnityEngine.PostProcessing中有说明<br>
+如果激活就会执行该函数传递进去的是一张白色图,通过下面就找到了来源</p>
+<pre class="hljs"><code><div>            Texture autoExposure = GraphicsUtils.whiteTexture;
+            <span class="hljs-keyword">if</span> (m_EyeAdaptation.active)
+            {
+                uberActive = <span class="hljs-literal">true</span>;
+                autoExposure = m_EyeAdaptation.Prepare(src, uberMaterial);
+            }
+
+            uberMaterial.SetTexture(<span class="hljs-string">"_AutoExposure"</span>, autoExposure);
+            <span class="hljs-keyword">if</span> (m_Bloom.active)
+            {
+                uberActive = <span class="hljs-literal">true</span>;
+                m_Bloom.Prepare(src, uberMaterial, autoExposure);
+            }
+</div></code></pre>
+<p>关于 GraphicsUnitls 也是引擎基础后处理<br>
+默认还是创建一张白图</p>
+<pre class="hljs"><code><div>        <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> Texture2D whiteTexture
+        {
+            <span class="hljs-built_in">get</span>
+            {
+                <span class="hljs-keyword">if</span> (s_WhiteTexture != null)
+                    <span class="hljs-keyword">return</span> s_WhiteTexture;
+
+                s_WhiteTexture = <span class="hljs-keyword">new</span> Texture2D(<span class="hljs-number">1</span>, <span class="hljs-number">1</span>, TextureFormat.ARGB32, <span class="hljs-literal">false</span>);
+                s_WhiteTexture.SetPixel(<span class="hljs-number">0</span>, <span class="hljs-number">0</span>, <span class="hljs-keyword">new</span> Color(<span class="hljs-number">1f</span>, <span class="hljs-number">1f</span>, <span class="hljs-number">1f</span>, <span class="hljs-number">1f</span>));
+                s_WhiteTexture.Apply();
+
+                <span class="hljs-keyword">return</span> s_WhiteTexture;
+            }
+        }
+</div></code></pre>
+<p>在bloomshader关于高动态处理 在手机上不应用 在这里有定义</p>
+<pre class="hljs"><code><div>            <span class="hljs-comment">// <span class="hljs-doctag">TODO:</span> Extend the use of RGBM to the whole chain for mobile platforms</span>
+            var useRGBM = Application.isMobilePlatform;
+            var rtFormat = useRGBM
+                ? RenderTextureFormat.Default
+                : RenderTextureFormat.DefaultHDR;
+</div></code></pre>
+<p>采样rt 进行缩放</p>
+<pre class="hljs"><code><div>            <span class="hljs-comment">// Do bloom on a half-res buffer, full-res doesn't bring much and kills performances on</span>
+            <span class="hljs-comment">// fillrate limited platforms</span>
+            var tw = context.<span class="hljs-built_in">width</span> / <span class="hljs-number">2</span>;
+            var th = context.<span class="hljs-built_in">height</span> / <span class="hljs-number">2</span>;
+</div></code></pre>
+<p>关于阈值的设置<br>
+在对应结构中可以看到  get { return Mathf.GammaToLinearSpace(threshold); } 进行了一个现在转换操作</p>
+<pre class="hljs"><code><div>            <span class="hljs-comment">// Uupdate the shader properties</span>
+            <span class="hljs-keyword">float</span> lthresh = bloom.thresholdLinear;
+            material.SetFloat(Uniforms._Threshold, lthresh);
+</div></code></pre>
+<p>关于curve设置在shader最后有使用这里是使用了一个曲线</p>
+<pre class="hljs"><code><div>  <span class="hljs-keyword">float</span> knee = lthresh * bloom.softKnee + <span class="hljs-number">1e-5</span>f;
+            var curve = <span class="hljs-keyword">new</span> Vector3(lthresh - knee, knee * <span class="hljs-number">2f</span>, <span class="hljs-number">0.25f</span> / knee);
+            material.SetVector(Uniforms._Curve, curve);
+</div></code></pre>
+<p>偏移值设置</p>
+<pre class="hljs"><code><div> material.SetFloat(Uniforms._PrefilterOffs, bloom.antiFlicker ? <span class="hljs-number">-0.5f</span> : <span class="hljs-number">0f</span>);
+</div></code></pre>
+<p>采样缩放<br>
+通过定义可以知道bloom 半径总是小于8</p>
+<pre class="hljs"><code><div>            var tw = context.<span class="hljs-built_in">width</span> / <span class="hljs-number">2</span>;
+            var th = context.<span class="hljs-built_in">height</span> / <span class="hljs-number">2</span>;
+            <span class="hljs-keyword">float</span> logh = Mathf.Log(th, <span class="hljs-number">2f</span>) + bloom.radius - <span class="hljs-number">8f</span>;
+            <span class="hljs-keyword">int</span> logh_i = (<span class="hljs-keyword">int</span>)logh;
+            <span class="hljs-keyword">float</span> sampleScale = <span class="hljs-number">0.5f</span> + logh - logh_i;
+            material.SetFloat(Uniforms._SampleScale, sampleScale);
+
+<span class="hljs-comment">// 其实就是视口长和宽了</span>
+         <span class="hljs-keyword">public</span> <span class="hljs-keyword">int</span> <span class="hljs-built_in">width</span>
+        {
+            <span class="hljs-built_in">get</span> { <span class="hljs-keyword">return</span> camera.pixelWidth; }
+        }
+
+        <span class="hljs-keyword">public</span> <span class="hljs-keyword">int</span> <span class="hljs-built_in">height</span>
+        {
+            <span class="hljs-built_in">get</span> { <span class="hljs-keyword">return</span> camera.pixelHeight; }
+        }
+</div></code></pre>
+<p>get 设置rt</p>
+<pre class="hljs"><code><div>            <span class="hljs-comment">// Prefilter pass</span>
+            var prefiltered = context.renderTextureFactory.Get(tw, th, <span class="hljs-number">0</span>, rtFormat);
+            Graphics.Blit(source, prefiltered, material, <span class="hljs-number">0</span>);
+</div></code></pre>
+<p>到这里只是对整个流程做了一个初步的认识，关于到底是怎么处理关系还需要 进一步研究实现</p>
 
 </body>
 </html>
